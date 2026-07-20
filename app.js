@@ -10,7 +10,7 @@ const imageModalImg = document.getElementById("image-modal-img");
 const imageModalBackdrop = document.getElementById("image-modal-backdrop");
 const imageModalClose = document.getElementById("image-modal-close");
 
-const supabase = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const supabase = window.supabase ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
 
 let state = {
   view: "home",
@@ -40,6 +40,11 @@ function showMessage(message) {
 async function render() {
   updateActiveNav();
 
+  if (!window.supabase) {
+    renderSupabaseLoadError();
+    return;
+  }
+
   if (!hasSupabaseConfig()) {
     renderMissingConfig();
     return;
@@ -52,6 +57,10 @@ async function render() {
   } else if (state.view === "fields") {
     await renderFields();
   }
+}
+
+function renderSupabaseLoadError() {
+  showMessage("Unable to load Supabase client script. Check your network or script URL.");
 }
 
 function renderMissingConfig() {
