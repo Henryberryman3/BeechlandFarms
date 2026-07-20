@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Beechland Farms</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">Beechland Farms</div>
+        <nav>
+          <button id="nav-home" class="nav-button active">Home</button>
+          <button id="nav-farms" class="nav-button">Farms</button>
+        </nav>
+      </header>
+
+      <main id="page-content" class="page-content"></main>
+    </div>
+
+    <div id="image-modal" class="image-modal" aria-hidden="true">
+      <div class="image-modal-backdrop" id="image-modal-backdrop"></div>
+      <div class="image-modal-content">
+        <button id="image-modal-close" class="image-modal-close" aria-label="Close image preview">×</button>
+        <img id="image-modal-img" src="" alt="Expanded field image" />
+      </div>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
