@@ -1,37 +1,26 @@
-const STORAGE_KEY = "beechland-farms-data";
+const SUPABASE_URL = "https://tvwjsyidqxmjsljfxyqd.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_XaDMM-l1bav5ncZ5OccF8w_lY-L1UCT";
+const STORAGE_BUCKET = "field-images";
+
 const pageContent = document.getElementById("page-content");
 const navHome = document.getElementById("nav-home");
 const navFarms = document.getElementById("nav-farms");
+const imageModal = document.getElementById("image-modal");
+const imageModalImg = document.getElementById("image-modal-img");
+const imageModalBackdrop = document.getElementById("image-modal-backdrop");
+const imageModalClose = document.getElementById("image-modal-close");
+
+const supabase = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 let state = {
   view: "home",
   farmId: null,
-  data: { farms: [] },
+  farms: [],
+  farmMeta: { fieldCounts: {}, imageCounts: {} },
 };
 
-function loadState() {
-  const saved = localStorage.getItem(STORAGE_KEY);
-  if (saved) {
-    try {
-      state.data = JSON.parse(saved);
-    } catch (err) {
-      console.error("Could not parse saved data", err);
-    }
-  }
-}
-
-function saveState() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state.data));
-}
-
-function setView(view, farmId = null) {
-  state.view = view;
-  state.farmId = farmId;
-  render();
-}
-
-function getCurrentFarm() {
-  return state.data.farms.find((farm) => farm.id === state.farmId) || null;
+function hasSupabaseConfig() {
+  return !SUPABASE_URL.includes("YOUR-SUPABASE") && !SUPABASE_ANON_KEY.includes("YOUR-ANON");
 }
 
 function updateActiveNav() {
@@ -39,23 +28,71 @@ function updateActiveNav() {
   navFarms.classList.toggle("active", state.view === "farms");
 }
 
-function render() {
+function showMessage(message) {
+  pageContent.innerHTML = `
+    <section>
+      <h1 class="section-title">Beechland Farms</h1>
+      <p class="description">${message}</p>
+    </section>
+  `;
+}
+
+async function render() {
   updateActiveNav();
+
+  if (!hasSupabaseConfig()) {
+    renderMissingConfig();
+    return;
+  }
 
   if (state.view === "home") {
     renderHome();
   } else if (state.view === "farms") {
-    renderFarms();
+    await renderFarms();
   } else if (state.view === "fields") {
-    renderFields();
+    await renderFields();
   }
+}
+
+function renderMissingConfig() {
+  showMessage("Set SUPABASE_URL and SUPABASE_ANON_KEY in app.js, then open the app again.");
+}
+
+function getHashState() {
+  const hash = location.hash.slice(1);
+  if (hash === "home") return { view: "home" };
+  if (hash === "farms") return { view: "farms" };
+  if (hash.startsWith("farm=")) return { view: "fields", farmId: hash.split("=")[1] };
+  return null;
+}
+
+function updateHash() {
+  if (state.view === "fields" && state.farmId) {
+    location.hash = `farm=${state.farmId}`;
+  } else if (state.view === "farms") {
+    location.hash = "farms";
+  } else {
+    location.hash = "home";
+  }
+}
+
+async function loadInitialState() {
+  const hashState = getHashState();
+  if (hashState) {
+    state.view = hashState.view;
+    state.farmId = hashState.farmId || null;
+    await render();
+    return;
+  }
+
+  await render();
 }
 
 function renderHome() {
   pageContent.innerHTML = `
     <section>
       <h1 class="section-title">Welcome to Beechland Farms</h1>
-      <p class="description">Manage your farms, add fields, and upload images in one simple app. The interface keeps everything clean and easy to use.</p>
+      <p class="description">Manage your farms, add fields, and upload images in one shared Supabase backend.</p>
       <button id="home-action" class="primary">Go to farms</button>
     </section>
   `;
@@ -63,17 +100,63 @@ function renderHome() {
   document.getElementById("home-action").addEventListener("click", () => setView("farms"));
 }
 
-function renderFarms() {
-  const farms = state.data.farms;
-  const farmsHtml = farms.length
-    ? farms
-        .map(
-          (farm) => `
-          <div class="card" data-id="${farm.id}">
-            <h2 class="card-title">${farm.name}</h2>
-            <p class="card-subtitle">${farm.fields.length} fields · ${farm.images?.length || 0} images</p>
-          </div>`
-        )
+async function getImageUrl(path) {
+  const { data, error } = await supabase.storage
+    .from(STORAGE_BUCKET)
+    .createSignedUrl(path, 60 * 60 * 24); // valid for 24 hours
+
+  if (!error && data && data.signedUrl) {
+    return data.signedUrl;
+  }
+
+  const publicResponse = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(path);
+  return publicResponse.data?.publicUrl || "";
+}
+
+async function loadFarmData() {
+  const [farmRes, fieldRes, imageRes] = await Promise.all([
+    supabase.from("farms").select("id,name").order("created_at", { ascending: true }),
+    supabase.from("fields").select("id,farm_id").order("created_at", { ascending: true }),
+    supabase.from("field_images").select("id,farm_id").order("created_at", { ascending: true }),
+  ]);
+
+  if (farmRes.error) {
+    showMessage(`Unable to load farms: ${farmRes.error.message}`);
+    return false;
+  }
+
+  const fieldCounts = {};
+  const imageCounts = {};
+
+  (fieldRes.data || []).forEach((field) => {
+    fieldCounts[field.farm_id] = (fieldCounts[field.farm_id] || 0) + 1;
+  });
+
+  (imageRes.data || []).forEach((image) => {
+    imageCounts[image.farm_id] = (imageCounts[image.farm_id] || 0) + 1;
+  });
+
+  state.farms = farmRes.data || [];
+  state.farmMeta = { fieldCounts, imageCounts };
+
+  return true;
+}
+
+async function renderFarms() {
+  const loaded = await loadFarmData();
+  if (!loaded) return;
+
+  const farmsHtml = state.farms.length
+    ? state.farms
+        .map((farm) => {
+          const fieldCount = state.farmMeta.fieldCounts[farm.id] || 0;
+          const imageCount = state.farmMeta.imageCounts[farm.id] || 0;
+          return `
+            <div class="card" data-id="${farm.id}">
+              <h2 class="card-title">${farm.name}</h2>
+              <p class="card-subtitle">${fieldCount} fields · ${imageCount} images</p>
+            </div>`;
+        })
         .join("")
     : `<p class="description">No farms yet. Add your first farm to get started.</p>`;
 
@@ -90,21 +173,19 @@ function renderFarms() {
     </section>
   `;
 
-  document.getElementById("add-farm").addEventListener("click", () => {
+  document.getElementById("add-farm").addEventListener("click", async () => {
     const field = document.getElementById("farm-name");
     const name = field.value.trim();
     if (!name) return;
 
-    state.data.farms.push({
-      id: `farm-${Date.now()}`,
-      name,
-      fields: [],
-      images: [],
-    });
+    const { error } = await supabase.from("farms").insert([{ name }]);
+    if (error) {
+      showMessage(`Unable to add farm: ${error.message}`);
+      return;
+    }
 
     field.value = "";
-    saveState();
-    renderFarms();
+    await renderFarms();
   });
 
   document.querySelectorAll(".card").forEach((card) => {
@@ -114,46 +195,84 @@ function renderFarms() {
   });
 }
 
-function renderFields() {
-  const farm = getCurrentFarm();
+async function loadFarmDetails(farmId) {
+  const [farmRes, fieldsRes, imagesRes] = await Promise.all([
+    supabase.from("farms").select("id,name").eq("id", farmId).single(),
+    supabase.from("fields").select("id,name,crop").eq("farm_id", farmId).order("created_at", { ascending: true }),
+    supabase.from("field_images").select("id,field_id,storage_path").eq("farm_id", farmId).order("created_at", { ascending: true }),
+  ]);
+
+  if (farmRes.error || fieldsRes.error || imagesRes.error) {
+    return null;
+  }
+
+  const imagesByField = {};
+  (imagesRes.data || []).forEach((image) => {
+    imagesByField[image.field_id] = imagesByField[image.field_id] || [];
+    imagesByField[image.field_id].push(image.storage_path);
+  });
+
+  return {
+    id: farmRes.data.id,
+    name: farmRes.data.name,
+    fields: fieldsRes.data || [],
+    imagesByField,
+  };
+}
+
+async function renderFields() {
+  const farm = await loadFarmDetails(state.farmId);
   if (!farm) {
     setView("farms");
     return;
   }
 
   const fieldsHtml = farm.fields.length
-    ? farm.fields
-        .map(
-          (field) => `
-          <div class="field-item">
-            <div class="field-header">
-              <div>
-                <strong>${field.name}</strong>
-                <p class="field-meta">Crop: ${field.crop}</p>
+    ? await Promise.all(
+        farm.fields.map(async (field) => {
+          const fieldImages = farm.imagesByField[field.id] || [];
+          const galleryHtml = fieldImages.length
+            ? (
+                await Promise.all(
+                  fieldImages.map(async (path) => {
+                    const imageUrl = await getImageUrl(path);
+                    return `<img src="${imageUrl}" alt="Field image" data-path="${path}" />`;
+                  })
+                )
+              ).join("")
+            : `<p class="description small-note">No images yet for this field.</p>`;
+
+          return `
+            <div class="field-item">
+              <div class="field-header">
+                <div>
+                  <strong>${field.name}</strong>
+                  <p class="field-meta">Crop: ${field.crop}</p>
+                </div>
+                <span class="field-meta">${fieldImages.length} image${fieldImages.length === 1 ? "" : "s"}</span>
               </div>
-              <span class="field-meta">${field.images.length} image${field.images.length === 1 ? "" : "s"}</span>
-            </div>
-            <div class="field-upload">
-              <input id="image-upload-${field.id}" type="file" accept="image/*" multiple />
-              <button data-field-id="${field.id}" class="primary upload-field-images">Upload images</button>
-            </div>
-            <div class="field-gallery" id="gallery-${field.id}">
-              ${field.images.length
-                ? field.images
-                    .map((src) => `<img src="${src}" alt="Field image" />`)
-                    .join("")
-                : `<p class="description small-note">No images yet for this field.</p>`}
-            </div>
-          </div>`
-        )
+              <div class="field-upload">
+                <input id="image-upload-${field.id}" type="file" accept="image/*" multiple />
+                <button data-field-id="${field.id}" class="primary upload-field-images">Upload images</button>
+              </div>
+              <div class="field-gallery" id="gallery-${field.id}">${galleryHtml}</div>
+            </div>`;
+        })
         .join("")
     : `<p class="description">No fields yet. Add one to organize your farm.</p>`;
 
+  const baseUrl = window.location.href.split("#")[0];
+  const shareUrl = `${baseUrl}#farm=${farm.id}`;
+
   pageContent.innerHTML = `
     <section>
-      <a href="#" id="back-button" class="back-link">← Back to farms</a>
+      <div class="section-header">
+        <a href="#" id="back-button" class="back-link">← Back to farms</a>
+        <button id="copy-share-link" class="secondary">Copy share link</button>
+      </div>
       <h1 class="section-title">${farm.name}</h1>
-      <p class="description">Add fields below and upload images that belong to each field.</p>
+      <p class="description">This page shows field details for the selected farm and lets you upload images for each field.</p>
+      <p class="description small-note">Share this page with others to let them view the same farm and its uploaded images.</p>
 
       <div class="form-row">
         <input id="field-name" type="text" placeholder="Field name" />
@@ -170,43 +289,68 @@ function renderFields() {
     setView("farms");
   });
 
-  document.getElementById("add-field").addEventListener("click", () => {
+  const copyShareLinkButton = document.getElementById("copy-share-link");
+  if (copyShareLinkButton) {
+    copyShareLinkButton.addEventListener("click", async () => {
+      const baseUrl = window.location.href.split("#")[0];
+      const url = `${baseUrl}#farm=${farm.id}`;
+      try {
+        await navigator.clipboard.writeText(url);
+        copyShareLinkButton.textContent = "Copied!";
+        setTimeout(() => {
+          copyShareLinkButton.textContent = "Copy share link";
+        }, 1500);
+      } catch (error) {
+        alert(`Copy this link to share: ${url}`);
+      }
+    });
+  }
+
+  document.getElementById("add-field").addEventListener("click", async () => {
     const nameInput = document.getElementById("field-name");
     const cropInput = document.getElementById("field-crop");
     const name = nameInput.value.trim();
     const crop = cropInput.value.trim();
     if (!name || !crop) return;
 
-    farm.fields.push({ id: `field-${Date.now()}`, name, crop, images: [] });
+    const { error } = await supabase.from("fields").insert([{ farm_id: farm.id, name, crop }]);
+    if (error) {
+      showMessage(`Unable to add field: ${error.message}`);
+      return;
+    }
+
     nameInput.value = "";
     cropInput.value = "";
-    saveState();
-    renderFields();
+    await renderFields();
   });
 
   document.querySelectorAll(".upload-field-images").forEach((button) => {
     button.addEventListener("click", async () => {
       const fieldId = button.dataset.fieldId;
-      const field = farm.fields.find((item) => item.id === fieldId);
-      if (!field) return;
-
       const input = document.getElementById(`image-upload-${fieldId}`);
       const files = Array.from(input.files || []);
       if (!files.length) return;
 
-      const promises = files.map((file) => {
-        return new Promise((resolve) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result);
-          reader.readAsDataURL(file);
-        });
-      });
+      await Promise.all(
+        files.map(async (file) => {
+          const filePath = `${farm.id}/${fieldId}/${Date.now()}-${file.name}`;
+          const { error: uploadError } = await supabase.storage
+            .from(STORAGE_BUCKET)
+            .upload(filePath, file, { cacheControl: "3600", upsert: false });
 
-      const images = await Promise.all(promises);
-      field.images.push(...images);
+          if (uploadError) {
+            showMessage(`Unable to upload image: ${uploadError.message}`);
+            return;
+          }
+
+          await supabase.from("field_images").insert([
+            { farm_id: farm.id, field_id: fieldId, storage_path: filePath },
+          ]);
+        })
+      );
+
       input.value = "";
-      saveState();
-      renderFields();
+      await renderFields();
     });
   });
 
@@ -218,28 +362,36 @@ function renderFields() {
 }
 
 function openImagePreview(src) {
-  const modal = document.getElementById("image-modal");
-  const modalImg = document.getElementById("image-modal-img");
-  modalImg.src = src;
-  modal.classList.add("open");
-  modal.setAttribute("aria-hidden", "false");
+  imageModalImg.src = src;
+  imageModal.classList.add("open");
+  imageModal.setAttribute("aria-hidden", "false");
 }
 
 function closeImagePreview() {
-  const modal = document.getElementById("image-modal");
-  const modalImg = document.getElementById("image-modal-img");
-  modal.classList.remove("open");
-  modal.setAttribute("aria-hidden", "true");
-  modalImg.src = "";
+  imageModal.classList.remove("open");
+  imageModal.setAttribute("aria-hidden", "true");
+  imageModalImg.src = "";
 }
 
-const modalBackdrop = document.getElementById("image-modal-backdrop");
-const modalClose = document.getElementById("image-modal-close");
-modalBackdrop.addEventListener("click", closeImagePreview);
-modalClose.addEventListener("click", closeImagePreview);
-
+imageModalBackdrop.addEventListener("click", closeImagePreview);
+imageModalClose.addEventListener("click", closeImagePreview);
 navHome.addEventListener("click", () => setView("home"));
 navFarms.addEventListener("click", () => setView("farms"));
 
-loadState();
-render();
+async function setView(view, farmId = null) {
+  state.view = view;
+  state.farmId = farmId;
+  updateHash();
+  await render();
+}
+
+window.addEventListener("hashchange", async () => {
+  const hashState = getHashState();
+  if (hashState) {
+    state.view = hashState.view;
+    state.farmId = hashState.farmId || null;
+    await render();
+  }
+});
+
+loadInitialState();
